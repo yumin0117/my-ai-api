@@ -1,92 +1,96 @@
-# 📋 main.py · [실습 6-1] 심화 ① 접근 코드로 내 API 지키기 — 헤더 X-Access-Code (POST 한 번에 요청 1번)
+# 📋 main.py · [실습 6-1] 백엔드 — 사진 · 음성 도우미 API (Vercel 에 올릴 main.py · POST 한 번에 요청 1번)
+# · 키는 서버 환경 변수 GEMINI_API_KEY · 접근 코드는 APP_ACCESS_CODE (13주차와 같음)
+# · 사진 · 음성은 화면(Streamlit)이 base64 글자로 바꿔 JSON 으로 보냄 — Vercel 요청 본문 4.5MB 이하
+import base64
+import binascii
 import os
+from typing import Literal
+
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
 MODEL_NAME = "gemini-3.5-flash-lite"
-MAX_TURNS = 6                                 # 최근 몇 턴을 기억할지
-SYSTEM_PROMPT = "너는 '폴리봇'이야. 인공지능소프트웨어과 1학년의 파이썬 · AI 공부 도우미야. 존댓말로 3문장 이내로 답한다. 개인정보를 묻지 않는다."
-app = FastAPI(title="AI 용어 설명 API", description="용어를 보내면 Gemini 가 쉬운 말로 설명해 줍니다.")
+MAX_B64 = 4_000_000                 # base64 글자 수 상한 — Vercel 요청 본문 4.5MB 보다 조금 작게
+VOICE_PROMPTS = {
+    "받아쓰기": "이 음성을 한국어로 그대로 받아써 줘. 잘 안 들리는 부분은 (?) 로 표시해 줘.",
+    "한 줄 요약": "이 음성의 내용을 한 문장으로 요약해 줘.",
+    "영어로 번역": "이 음성의 내용을 자연스러운 영어로 번역해 줘.",
+}
+app = FastAPI(title="사진 · 음성 도우미 API", description="사진이나 음성을 base64 로 보내면 Gemini 가 읽고 답합니다.")
 
 
-class Question(BaseModel):
-    word: str = Field(min_length=1, max_length=30, description="궁금한 용어")
-    style: str = Field(default="초등학생도 알아듣게 쉽게", description="설명 말투")
+class PhotoRequest(BaseModel):
+    image_b64: str = Field(min_length=1, description="사진(JPEG · PNG)을 base64 로 바꾼 글자")
+    mime_type: Literal["image/jpeg", "image/png"] = "image/jpeg"
+    question: str = Field(default="이 사진에 무엇이 있는지 3문장 이내로 설명해 줘.", max_length=300)
 
 
-class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=500, description="이번에 보낼 말")
-    history: list[dict] = Field(default_factory=list, description="지난 대화 기록 (이전 응답의 history 를 그대로 보냄)")
+class VoiceRequest(BaseModel):
+    audio_b64: str = Field(min_length=1, description="녹음(WAV)을 base64 로 바꾼 글자")
+    task: Literal["받아쓰기", "한 줄 요약", "영어로 번역"] = "받아쓰기"
 
 
-class ChatReply(BaseModel):
-    answer: str
-    history: list[dict]                       # 다음 요청 때 그대로 다시 보낼 기록
-
-
-class Answer(BaseModel):                      # 응답(JSON)의 모양 — /docs 에도 그대로 나옴
-    word: str
+class Answer(BaseModel):
     answer: str
     tokens: int | None = None
 
 
-def get_client():
-    """키는 서버의 환경 변수 GEMINI_API_KEY 에서 읽음 — 코드 · 저장소에 적지 않음"""
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=503, detail="서버에 GEMINI_API_KEY 가 없습니다 — 환경 변수를 확인하세요")
-    return genai.Client(
-        api_key=api_key,
-        http_options=types.HttpOptions(timeout=60_000, retry_options=types.HttpRetryOptions(http_status_codes=[500, 503])),
-    )
-
-
 def check_access(access_code):
-    """서버 환경 변수 APP_ACCESS_CODE 가 있으면, 요청 헤더의 접근 코드가 같아야만 통과"""
+    """APP_ACCESS_CODE 가 정해져 있으면, 요청 헤더 X-Access-Code 가 같아야만 통과"""
     expected = os.environ.get("APP_ACCESS_CODE")
     if expected and access_code != expected:
         raise HTTPException(status_code=401, detail="접근 코드가 틀렸습니다 — 헤더 X-Access-Code 를 확인하세요")
 
 
-def trim_history(history, max_turns):
-    """최근 max_turns 턴만 남긴 새 리스트를 돌려준다 (11주차와 같음)"""
-    user_positions = [index for index, step in enumerate(history) if step.get("type") == "user_input"]
-    if len(user_positions) <= max_turns:
-        return history
-    return history[user_positions[-max_turns]:]
-
-
-def ask_gemini(client, system_instruction, contents):
-    """Gemini 에 묻고, 실패하면 알맞은 상태 번호와 한글 안내로 바꿔 돌려보냄"""
+def check_b64(text):
+    """base64 글자가 맞는지 · 너무 크지 않은지 먼저 검사 — 틀리면 Gemini 까지 가지 않음"""
+    if len(text) > MAX_B64:
+        raise HTTPException(status_code=413, detail="파일이 너무 큽니다 — 사진은 줄이고, 녹음은 짧게 보내세요")
     try:
-        return client.interactions.create(model=MODEL_NAME, store=False, system_instruction=system_instruction, input=contents)
+        base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=422, detail="base64 글자가 아닙니다 — 화면에서 b64encode 했는지 확인하세요")
+
+
+def get_client():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="서버에 GEMINI_API_KEY 가 없습니다 — 환경 변수를 확인하세요")
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=120_000, retry_options=types.HttpRetryOptions(http_status_codes=[500, 503])),
+    )
+
+
+def ask(text, part):
+    """글 부분 + 사진(음성) 부분을 Gemini 에 보내고 Answer 로 돌려줌"""
+    client = get_client()                           # 변수에 담아 둠 (9주차 — 담지 않으면 요청 전에 닫힘)
+    try:
+        reply = client.interactions.create(model=MODEL_NAME, store=False, input=[{"type": "text", "text": text}, part])
     except Exception as error:
         code = getattr(error, "status_code", None)
         if code == 429:
             raise HTTPException(status_code=429, detail="Gemini 무료 한도를 넘었습니다 — 1분 뒤 다시 요청하세요")
         raise HTTPException(status_code=502, detail=f"Gemini 요청 실패 (상태 번호 {code})")
+    return Answer(answer=reply.output_text, tokens=reply.usage.total_tokens)
 
 
 @app.get("/")
 def home():
-    return {"message": "AI 용어 설명 API 입니다. /docs 에서 사용법을 보세요."}
+    return {"message": "사진 · 음성 도우미 API 입니다. /docs 에서 사용법을 보세요.", "tasks": list(VOICE_PROMPTS)}
 
 
-@app.post("/explain", response_model=Answer)
-def explain(question: Question, x_access_code: str | None = Header(default=None)):   # 헤더 X-Access-Code 를 받음
-    check_access(x_access_code)               # ★ Gemini 를 부르기 전에 먼저 검사 (틀리면 요청이 나가지 않음)
-    client = get_client()
-    reply = ask_gemini(client, f"너는 AI 용어 설명 도우미야. {question.style} 3문장 이내로 설명한다.", question.word)
-    return Answer(word=question.word, answer=reply.output_text, tokens=reply.usage.total_tokens)
+@app.post("/describe", response_model=Answer)
+def describe(request: PhotoRequest, x_access_code: str | None = Header(default=None)):
+    check_access(x_access_code)                     # ① 접근 코드
+    check_b64(request.image_b64)                    # ② 크기 · base64 검사
+    return ask(request.question, {"type": "image", "data": request.image_b64, "mime_type": request.mime_type})
 
 
-@app.post("/chat", response_model=ChatReply)
-def chat(request: ChatRequest, x_access_code: str | None = Header(default=None)):
-    """서버는 대화를 기억하지 않음 — 부르는 쪽이 history 를 들고 와서 다시 보냄 (11주차 stateless 방식)"""
+@app.post("/listen", response_model=Answer)
+def listen(request: VoiceRequest, x_access_code: str | None = Header(default=None)):
     check_access(x_access_code)
-    client = get_client()
-    send_list = trim_history(request.history + [{"type": "user_input", "content": [{"type": "text", "text": request.message}]}], MAX_TURNS)
-    reply = ask_gemini(client, SYSTEM_PROMPT, send_list)
-    return ChatReply(answer=reply.output_text, history=send_list + [step.model_dump(mode="json") for step in reply.steps])
+    check_b64(request.audio_b64)
+    return ask(VOICE_PROMPTS[request.task], {"type": "audio", "data": request.audio_b64, "mime_type": "audio/wav"})
