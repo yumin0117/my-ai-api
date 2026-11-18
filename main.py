@@ -1,6 +1,6 @@
-# 📋 main.py · [실습 3-2] 챗봇 API — 기록은 부르는 쪽이 들고 다님 (POST /explain · /chat 한 번에 요청 1번)
+# 📋 main.py · [실습 6-1] 심화 ① 접근 코드로 내 API 지키기 — 헤더 X-Access-Code (POST 한 번에 요청 1번)
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -43,6 +43,13 @@ def get_client():
     )
 
 
+def check_access(access_code):
+    """서버 환경 변수 APP_ACCESS_CODE 가 있으면, 요청 헤더의 접근 코드가 같아야만 통과"""
+    expected = os.environ.get("APP_ACCESS_CODE")
+    if expected and access_code != expected:
+        raise HTTPException(status_code=401, detail="접근 코드가 틀렸습니다 — 헤더 X-Access-Code 를 확인하세요")
+
+
 def trim_history(history, max_turns):
     """최근 max_turns 턴만 남긴 새 리스트를 돌려준다 (11주차와 같음)"""
     user_positions = [index for index, step in enumerate(history) if step.get("type") == "user_input"]
@@ -68,15 +75,17 @@ def home():
 
 
 @app.post("/explain", response_model=Answer)
-def explain(question: Question):
+def explain(question: Question, x_access_code: str | None = Header(default=None)):   # 헤더 X-Access-Code 를 받음
+    check_access(x_access_code)               # ★ Gemini 를 부르기 전에 먼저 검사 (틀리면 요청이 나가지 않음)
     client = get_client()
     reply = ask_gemini(client, f"너는 AI 용어 설명 도우미야. {question.style} 3문장 이내로 설명한다.", question.word)
     return Answer(word=question.word, answer=reply.output_text, tokens=reply.usage.total_tokens)
 
 
 @app.post("/chat", response_model=ChatReply)
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, x_access_code: str | None = Header(default=None)):
     """서버는 대화를 기억하지 않음 — 부르는 쪽이 history 를 들고 와서 다시 보냄 (11주차 stateless 방식)"""
+    check_access(x_access_code)
     client = get_client()
     send_list = trim_history(request.history + [{"type": "user_input", "content": [{"type": "text", "text": request.message}]}], MAX_TURNS)
     reply = ask_gemini(client, SYSTEM_PROMPT, send_list)
