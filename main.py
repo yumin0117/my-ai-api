@@ -106,11 +106,25 @@ def get_client():
         timeout=90_000, retry_options=types.HttpRetryOptions(attempts=1)))
 
 
+def output_schema(schema):
+    """생성 문법이 과도하게 커지는 수량·범위 제약은 서버 검증에 맡깁니다."""
+    bounds = {"minimum", "maximum", "minItems", "maxItems", "minLength", "maxLength", "default", "title"}
+
+    def simplify(value):
+        if isinstance(value, dict):
+            return {k: simplify(v) for k, v in value.items() if k not in bounds}
+        if isinstance(value, list):
+            return [simplify(v) for v in value]
+        return value
+
+    return simplify(schema.model_json_schema())
+
+
 def generate(contents, schema=None):
     options = {}
     if schema is not None:
         options["response_format"] = {"type": "text", "mime_type": "application/json",
-                                      "schema": schema.model_json_schema()}
+                                      "schema": output_schema(schema)}
     try:
         with get_client() as client:
             reply = client.interactions.create(model=MODEL_NAME, store=False, input=contents, **options)
