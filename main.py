@@ -124,7 +124,8 @@ def generate(contents, schema=None):
             raise HTTPException(status_code=503, detail="AI 서비스 인증에 실패했습니다. 서버의 API 키 설정을 확인해 주세요.") from error
         if str(code) == "404":
             raise HTTPException(status_code=503, detail="AI 모델을 사용할 수 없습니다. 서버의 GEMINI_MODEL 설정을 확인해 주세요.") from error
-        raise HTTPException(status_code=502, detail="AI 분석에 실패했습니다. 잠시 뒤 다시 시도해 주세요.") from error
+        reason = str(code) if isinstance(code, (int, str)) else type(error).__name__
+        raise HTTPException(status_code=502, detail=f"AI 분석에 실패했습니다. 잠시 뒤 다시 시도해 주세요. (AI 상태: {reason})") from error
     if not reply.output_text:
         raise HTTPException(status_code=502, detail="AI가 분석 결과를 반환하지 않았습니다. 다른 사진으로 시도해 주세요.")
     tokens = getattr(getattr(reply, "usage", None), "total_tokens", None)
