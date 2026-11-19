@@ -118,6 +118,10 @@ def generate(contents, schema=None):
         raise
     except Exception as error:
         code = getattr(error, "code", None) or getattr(error, "status_code", None)
+        # 응답 본문이나 키를 공개하지 않고 알려진 오류 원인만 구분합니다.
+        message = str(getattr(error, "message", "") or error).lower()
+        if "api_key_invalid" in message or "api key not valid" in message or "api key expired" in message:
+            raise HTTPException(status_code=503, detail="서버의 Gemini API 키가 유효하지 않거나 만료되었습니다. Vercel의 GEMINI_API_KEY를 확인해 주세요.") from error
         if str(code) == "429":
             raise HTTPException(status_code=429, detail="AI 요청 한도를 초과했습니다. 잠시 뒤 다시 시도해 주세요.") from error
         if str(code) in {"401", "403"}:
@@ -125,6 +129,9 @@ def generate(contents, schema=None):
         if str(code) == "404":
             raise HTTPException(status_code=503, detail="AI 모델을 사용할 수 없습니다. 서버의 GEMINI_MODEL 설정을 확인해 주세요.") from error
         reason = str(code) if isinstance(code, (int, str)) else type(error).__name__
+        if str(code) == "400":
+            fields = [name for name in ("schema", "response_format", "input", "model", "store", "mime_type", "image", "api key") if name in message]
+            reason += " / " + ", ".join(fields)
         raise HTTPException(status_code=502, detail=f"AI 분석에 실패했습니다. 잠시 뒤 다시 시도해 주세요. (AI 상태: {reason})") from error
     if not reply.output_text:
         raise HTTPException(status_code=502, detail="AI가 분석 결과를 반환하지 않았습니다. 다른 사진으로 시도해 주세요.")
